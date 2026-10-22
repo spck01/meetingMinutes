@@ -21,7 +21,7 @@ ffmpegは `imageio-ffmpeg` に同梱されたものを使うため、別途イ�
 ## セットアップ
 
 ```powershell
-git clone <このリポジトリのURL>
+git clone https://github.com/spck01/meetingMinutes.git
 cd meetingMinutes
 python -m venv venv
 .\venv\Scripts\python -m pip install -r requirements.txt
