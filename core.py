@@ -1,6 +1,6 @@
-"""録画/録音ファイル → 文字起こし(Whisper) → 議事録(GPT) の共通処理。
+"""録画/録音ファイル → 文字起こし → 議事録(GPT) の共通処理。
 
-Webアプリ(app.py)からも、将来のDiscord botからも同じ関数を呼べるようにしている。
+Webアプリ(server.py)からも、将来のDiscord botからも同じ関数を呼べるようにしている。
 """
 import os
 import subprocess
@@ -10,10 +10,17 @@ from typing import Callable
 import imageio_ffmpeg
 from openai import OpenAI
 
-TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "whisper-1")
+TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gpt-4o-transcribe")
 MINUTES_MODEL = os.getenv("MINUTES_MODEL", "gpt-5-mini")
-# Whisper APIは1ファイル25MBまでなので、10分ごとに分割する（32kbpsモノラルで1チャンク約2.4MB）
-CHUNK_SECONDS = 600
+# 文字起こしAPIは1ファイル25MBまでなので分割して送る。
+# whisper-1 は発言ごとのタイムスタンプを返せるので10分単位、
+# それ以外のモデルはチャンク単位の時刻しか付けられないので3分単位にして目安の時刻を細かくする。
+# 料金は音声の長さで決まるため、分割数を増やしても変わらない。
+CHUNK_SECONDS = int(os.getenv("CHUNK_SECONDS", "600" if TRANSCRIBE_MODEL == "whisper-1" else "180"))
+# 文字起こしに渡すヒント(prompt)の長さの上限。whisper-1 は末尾224トークンしか使わない
+HINT_MAX_CHARS = 400
+# チャンクの境目で文脈が途切れないよう、直前チャンクの末尾をヒントに含める
+CONTEXT_TAIL_CHARS = 150
 
 MINUTES_PROMPT = """あなたは優秀な議事録作成者です。以下は会議の文字起こし（音声認識の結果なので誤字・脱字を含む）です。
 これをもとに、日本語のMarkdownで議事録を作成してください。
@@ -64,31 +71,44 @@ def extract_audio_chunks(src: Path, workdir: Path) -> list[Path]:
     return chunks
 
 
+def build_hint(title: str = "", notes: str = "") -> str:
+    """会議名・補足情報を、文字起こしモデルに渡す語彙ヒントにする（固有名詞の認識精度が上がる）。"""
+    hint = "。".join(s.strip() for s in (title, notes) if s.strip())
+    return hint[:HINT_MAX_CHARS]
+
+
 def transcribe(
     client: OpenAI,
     chunks: list[Path],
     language: str | None = "ja",
+    hint: str = "",
     on_progress: Callable[[int, int], None] | None = None,
 ) -> str:
     """チャンクを順に文字起こしし、[h:mm:ss] 付きのテキストにまとめる。"""
     lines: list[str] = []
+    prev_tail = ""
     for i, path in enumerate(chunks):
         offset = i * CHUNK_SECONDS
         kwargs = {"model": TRANSCRIBE_MODEL}
         if language:
             kwargs["language"] = language
+        prompt = "\n".join(s for s in (hint, prev_tail) if s)
+        if prompt:
+            kwargs["prompt"] = prompt
         with open(path, "rb") as f:
             if TRANSCRIBE_MODEL == "whisper-1":
                 # whisper-1 だけがセグメント単位のタイムスタンプを返せる
                 res = client.audio.transcriptions.create(file=f, response_format="verbose_json", **kwargs)
-                for seg in res.segments or []:
-                    text = seg.text.strip()
-                    if text:
-                        lines.append(f"[{_fmt_time(offset + seg.start)}] {text}")
+                texts = [(seg.start, seg.text.strip()) for seg in res.segments or []]
             else:
                 res = client.audio.transcriptions.create(file=f, **kwargs)
-                if res.text.strip():
-                    lines.append(f"[{_fmt_time(offset)}] {res.text.strip()}")
+                texts = [(0, res.text.strip())]
+        for start, text in texts:
+            if text:
+                lines.append(f"[{_fmt_time(offset + start)}] {text}")
+        chunk_text = "".join(text for _, text in texts)
+        if chunk_text:
+            prev_tail = chunk_text[-CONTEXT_TAIL_CHARS:]
         if on_progress:
             on_progress(i + 1, len(chunks))
     return "\n".join(lines)
