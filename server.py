@@ -34,7 +34,9 @@ def _run_job(job: dict, src: Path, tmpdir: Path, api_key: str, language: str | N
         def on_progress(done: int, total: int):
             job["progress"] = {"done": done, "total": total}
 
-        transcript = core.transcribe(client, chunks, language=language, on_progress=on_progress)
+        transcript = core.transcribe(
+            client, chunks, language=language, hint=core.build_hint(title, notes), on_progress=on_progress
+        )
         job["transcript"] = transcript
 
         job["status"] = "writing"
