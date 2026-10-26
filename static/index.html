@@ -231,7 +231,7 @@
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5M12 3v12"/></svg>
         </div>
         <p class="dz-title">ここにファイルをドラッグ＆ドロップ</p>
-        <p class="dz-sub">または <u>クリックして選択</u> ・ MP4 / MOV / MKV / WebM / MP3 / M4A / WAV など（最大2GB）</p>
+        <p class="dz-sub">または <u>クリックして選択</u> ・ MP4 / MOV / MKV / WebM / MP3 / M4A / WAV など（最大5GB）</p>
       </div>
       <input type="file" id="fileInput" hidden accept="video/*,audio/*,.mkv">
 
@@ -351,10 +351,12 @@ let hasServerKey = false;
 let result = null;
 let activeTab = "minutes";
 let submittedTitle = "";
+let maxUploadBytes = 5 * 1000 ** 3;
 
 // ---- 初期設定 ----
 fetch("/api/config").then(r => r.json()).then(cfg => {
   hasServerKey = cfg.has_server_key;
+  maxUploadBytes = cfg.max_upload_bytes;
   $("modelHint").textContent = `文字起こし: ${cfg.transcribe_model} ／ 議事録: ${cfg.minutes_model}`;
   if (hasServerKey) $("keyHint").textContent = "サーバーの .env にキーが設定済みのため、入力は不要です。";
   updateSubmit();
@@ -371,6 +373,10 @@ $("fileInput").addEventListener("change", e => { if (e.target.files[0]) setFile(
 $("removeFile").addEventListener("click", () => setFile(null));
 
 function setFile(f) {
+  if (f && f.size > maxUploadBytes) {
+    toast(`ファイルが大きすぎます（${formatSize(f.size)}）。上限は${formatSize(maxUploadBytes)}です`);
+    f = null;
+  }
   file = f;
   $("fileInput").value = "";
   dz.hidden = !!f;
@@ -418,11 +424,13 @@ $("submit").addEventListener("click", () => {
   const key = store.get("openaiKey");
   if (!key && !hasServerKey) { $("openSettings").click(); toast("先にAPIキーを設定してください"); return; }
 
-  const fd = new FormData();
-  fd.append("file", file);
-  fd.append("title", $("title").value);
-  fd.append("notes", $("notes").value);
-  fd.append("language", $("language").value);
+  // ファイル本体はそのままボディで送り、付帯情報はクエリパラメータで渡す（サーバー側で二重書き込みしないため）
+  const params = new URLSearchParams({
+    filename: file.name,
+    title: $("title").value,
+    notes: $("notes").value,
+    language: $("language").value,
+  });
 
   submittedTitle = $("title").value.trim();
   $("submit").disabled = true;
@@ -434,7 +442,8 @@ $("submit").addEventListener("click", () => {
   $("progressCard").scrollIntoView({ behavior: "smooth", block: "start" });
 
   const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/jobs");
+  xhr.open("POST", `/api/jobs?${params}`);
+  xhr.setRequestHeader("Content-Type", "application/octet-stream");
   if (key) xhr.setRequestHeader("X-OpenAI-Key", key);
   xhr.upload.onprogress = e => { if (e.lengthComputable) setBar("upload", e.loaded / e.total); };
   xhr.onload = () => {
@@ -445,7 +454,7 @@ $("submit").addEventListener("click", () => {
     poll(data.id);
   };
   xhr.onerror = () => showError("サーバーに接続できませんでした。");
-  xhr.send(fd);
+  xhr.send(file);
 });
 
 async function poll(id) {
